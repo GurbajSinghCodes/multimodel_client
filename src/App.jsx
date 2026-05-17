@@ -4,7 +4,6 @@ import {
   Send,
   FileText,
   Settings,
-  Activity,
   MessageCircle,
   Database,
   Loader2,
@@ -25,15 +24,26 @@ import {
   uploadDocuments,
   askQuestion,
   getDocuments,
-  getHistory,
   getSettings,
   updateSettings,
-  clearHistory,
   deleteDocument,
 } from "./api";
 import "./index.css";
 
+const getDeviceId = () => {
+  let id = localStorage.getItem("rag_device_id");
+
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("rag_device_id", id);
+  }
+
+  return id;
+};
+
 export default function App() {
+  const [deviceId] = useState(getDeviceId);
+
   const [apiKey, setApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [files, setFiles] = useState([]);
@@ -49,9 +59,13 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [deletingDoc, setDeletingDoc] = useState(null);
+
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem("theme");
-    return saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    return (
+      saved === "dark" ||
+      (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    );
   });
 
   const [settings, setSettings] = useState({
@@ -61,7 +75,46 @@ export default function App() {
     temperature: 0.3,
   });
 
-  // Apply theme
+  const deviceDocsKey = `rag_docs_${deviceId}`;
+  const deviceHistoryKey = `rag_history_${deviceId}`;
+
+  const getDeviceDocuments = () => {
+    return JSON.parse(localStorage.getItem(deviceDocsKey) || "[]");
+  };
+
+  const saveDeviceDocument = (docName) => {
+    const existing = getDeviceDocuments();
+
+    if (!existing.includes(docName)) {
+      localStorage.setItem(deviceDocsKey, JSON.stringify([...existing, docName]));
+    }
+  };
+
+  const removeDeviceDocument = (docName) => {
+    const existing = getDeviceDocuments();
+    localStorage.setItem(
+      deviceDocsKey,
+      JSON.stringify(existing.filter((name) => name !== docName))
+    );
+  };
+
+  const clearDeviceDocuments = () => {
+    localStorage.removeItem(deviceDocsKey);
+  };
+
+  const getDeviceHistory = () => {
+    return JSON.parse(localStorage.getItem(deviceHistoryKey) || "[]");
+  };
+
+  const saveDeviceHistory = (item) => {
+    const existing = getDeviceHistory();
+    localStorage.setItem(deviceHistoryKey, JSON.stringify([...existing, item]));
+  };
+
+  const clearDeviceHistory = () => {
+    localStorage.removeItem(deviceHistoryKey);
+  };
+
   useEffect(() => {
     if (isDark) {
       document.documentElement.classList.add("dark");
@@ -79,17 +132,19 @@ export default function App() {
 
   const loadData = async () => {
     try {
-      const [healthData, docsData, historyData, settingsData] =
-        await Promise.all([
-          healthCheck(),
-          getDocuments(),
-          getHistory(),
-          getSettings(),
-        ]);
+      const [healthData, docsData, settingsData] = await Promise.all([
+        healthCheck(),
+        getDocuments(),
+        getSettings(),
+      ]);
+
+      const allowedDocs = getDeviceDocuments();
 
       setHealth(healthData);
-      setDocuments(docsData.documents || []);
-      setHistory(historyData.history || []);
+      setDocuments(
+        (docsData.documents || []).filter((doc) => allowedDocs.includes(doc.name))
+      );
+      setHistory(getDeviceHistory());
 
       if (settingsData.settings) {
         setSettings(settingsData.settings);
@@ -119,9 +174,13 @@ export default function App() {
         return;
       }
 
+      files.forEach((file) => saveDeviceDocument(file.name));
+
       showToast("Documents uploaded and indexed successfully!", "success");
       setFiles([]);
       await loadData();
+    } catch {
+      showToast("Upload failed", "error");
     } finally {
       setUploading(false);
     }
@@ -133,15 +192,19 @@ export default function App() {
     }
 
     setDeletingDoc(docName);
+
     try {
       const data = await deleteDocument(docName);
+
       if (!data.success) {
         showToast(data.message || "Failed to delete document", "error");
         return;
       }
+
+      removeDeviceDocument(docName);
       showToast(`"${docName}" deleted successfully!`, "success");
       await loadData();
-    } catch (error) {
+    } catch {
       showToast("Failed to delete document", "error");
     } finally {
       setDeletingDoc(null);
@@ -149,19 +212,25 @@ export default function App() {
   };
 
   const handleClearAllDocuments = async () => {
-    if (!window.confirm("⚠️ Are you sure you want to delete ALL documents? This action cannot be undone.")) {
+    if (
+      !window.confirm(
+        "⚠️ Are you sure you want to delete ALL documents visible on this device? This action cannot be undone."
+      )
+    ) {
       return;
     }
 
     setDeletingDoc("all");
+
     try {
-      // Delete each document individually
       for (const doc of documents) {
         await deleteDocument(doc.name);
       }
+
+      clearDeviceDocuments();
       showToast("All documents deleted successfully!", "success");
       await loadData();
-    } catch (error) {
+    } catch {
       showToast("Failed to delete all documents", "error");
     } finally {
       setDeletingDoc(null);
@@ -170,6 +239,7 @@ export default function App() {
 
   const handleAsk = async () => {
     if (!question.trim()) return;
+
     if (documents.length === 0) {
       showToast("Please upload documents first before asking questions.", "error");
       return;
@@ -180,7 +250,8 @@ export default function App() {
     setSources([]);
 
     try {
-      const data = await askQuestion(question, apiKey);
+      const currentQuestion = question;
+      const data = await askQuestion(currentQuestion, apiKey);
 
       if (!data.success) {
         setAnswer(data.message || "Something went wrong.");
@@ -189,8 +260,16 @@ export default function App() {
 
       setAnswer(data.answer);
       setSources(data.sources || []);
+
+      saveDeviceHistory({
+        question: currentQuestion,
+        answer: data.answer,
+      });
+
       setQuestion("");
       await loadData();
+    } catch {
+      setAnswer("Something went wrong.");
     } finally {
       setLoading(false);
     }
@@ -209,20 +288,17 @@ export default function App() {
   };
 
   const handleClearHistory = async () => {
-    if (!window.confirm("Are you sure you want to clear all question history?")) {
+    if (!window.confirm("Are you sure you want to clear question history on this device?")) {
       return;
     }
 
     setClearingHistory(true);
+
     try {
-      const data = await clearHistory();
-      if (!data.success) {
-        showToast(data.message || "Failed to clear history", "error");
-        return;
-      }
+      clearDeviceHistory();
       showToast("History cleared successfully!", "success");
       await loadData();
-    } catch (error) {
+    } catch {
       showToast("Failed to clear history", "error");
     } finally {
       setClearingHistory(false);
@@ -236,12 +312,11 @@ export default function App() {
   };
 
   const removeFile = (fileName) => {
-    setFiles(files.filter(f => f.name !== fileName));
+    setFiles(files.filter((f) => f.name !== fileName));
   };
 
   const hasDocuments = documents.length > 0;
 
-  // Theme classes
   const themeClasses = {
     bg: isDark ? "bg-gray-900" : "bg-gradient-to-br from-gray-50 to-gray-100",
     cardBg: isDark ? "bg-gray-800" : "bg-white",
@@ -255,21 +330,27 @@ export default function App() {
 
   return (
     <div className={`min-h-screen ${themeClasses.bg} transition-colors duration-300`}>
-      {/* Toast Notification */}
       {toast && (
         <div className="fixed top-4 right-4 z-50 animate-in slide-in-from-top-2 fade-in duration-200">
-          <div className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg ${toast.type === "error"
-              ? (isDark ? "bg-red-900/90 text-red-200 border border-red-800" : "bg-red-50 text-red-800 border border-red-200")
-              : (isDark ? "bg-green-900/90 text-green-200 border border-green-800" : "bg-green-50 text-green-800 border border-green-200")
-            }`}>
+          <div
+            className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg ${toast.type === "error"
+              ? isDark
+                ? "bg-red-900/90 text-red-200 border border-red-800"
+                : "bg-red-50 text-red-800 border border-red-200"
+              : isDark
+                ? "bg-green-900/90 text-green-200 border border-green-800"
+                : "bg-green-50 text-green-800 border border-green-200"
+              }`}
+          >
             {toast.type === "error" ? <AlertCircle size={20} /> : <Check size={20} />}
             <span className="text-sm font-medium">{toast.message}</span>
           </div>
         </div>
       )}
 
-      {/* Header/Hero Section */}
-      <div className={`border-b ${themeClasses.cardBorder} ${themeClasses.headerBg} backdrop-blur-sm sticky top-0 z-40`}>
+      <div
+        className={`border-b ${themeClasses.cardBorder} ${themeClasses.headerBg} backdrop-blur-sm sticky top-0 z-40`}
+      >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -277,24 +358,32 @@ export default function App() {
                 <Sparkles className="text-white" size={24} />
               </div>
               <div>
-                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide">RAG Document QA</p>
-                <h1 className={`text-xl font-bold ${themeClasses.textPrimary}`}>Intelligent Document Query</h1>
+                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide">
+                  RAG Document QA
+                </p>
+                <h1 className={`text-xl font-bold ${themeClasses.textPrimary}`}>
+                  Intelligent Document Query
+                </h1>
               </div>
             </div>
 
             <div className="flex items-center gap-3">
-              {/* Theme Toggle Button */}
               <button
                 onClick={() => setIsDark(!isDark)}
-                className={`p-2 rounded-lg transition-all ${isDark ? "bg-gray-700 text-yellow-400 hover:bg-gray-600" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+                className={`p-2 rounded-lg transition-all ${isDark
+                  ? "bg-gray-700 text-yellow-400 hover:bg-gray-600"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  }`}
                 title={isDark ? "Switch to Light Mode" : "Switch to Dark Mode"}
               >
                 {isDark ? <Sun size={18} /> : <Moon size={18} />}
               </button>
 
-              {/* Status Indicator - Simple Dot */}
               <div className="flex items-center gap-2">
-                <div className={`w-2.5 h-2.5 rounded-full ${health?.success ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                <div
+                  className={`w-2.5 h-2.5 rounded-full ${health?.success ? "bg-green-500 animate-pulse" : "bg-red-500"
+                    }`}
+                />
               </div>
             </div>
           </div>
@@ -302,14 +391,16 @@ export default function App() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Main Content - Adjusted Grid */}
         <div className="grid lg:grid-cols-2 gap-6">
-          {/* Upload Card */}
-          <div className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden hover:shadow-md transition-all`}>
+          <div
+            className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden hover:shadow-md transition-all`}
+          >
             <div className={`p-5 border-b ${themeClasses.cardBorder}`}>
               <div className="flex items-center gap-2">
                 <Upload size={18} className="text-blue-600" />
-                <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>Upload Documents</h2>
+                <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>
+                  Upload Documents
+                </h2>
               </div>
             </div>
 
@@ -330,29 +421,45 @@ export default function App() {
                 </button>
               </div>
 
-              <label className={`block border-2 border-dashed ${themeClasses.cardBorder} rounded-lg p-6 text-center cursor-pointer hover:border-blue-400 transition-colors ${isDark ? "bg-gray-900/50" : "bg-gray-50"}`}>
+              <label
+                className={`block border-2 border-dashed ${themeClasses.cardBorder} rounded-lg p-6 text-center cursor-pointer hover:border-blue-400 transition-colors ${isDark ? "bg-gray-900/50" : "bg-gray-50"
+                  }`}
+              >
                 <Upload size={32} className="mx-auto text-gray-400 mb-2" />
-                <p className={`text-sm font-medium ${themeClasses.textPrimary} mb-1`}>Click or drag files</p>
+                <p className={`text-sm font-medium ${themeClasses.textPrimary} mb-1`}>
+                  Click or drag files
+                </p>
                 <p className="text-xs text-gray-500">PDF, DOCX, TXT</p>
                 <input
                   type="file"
                   multiple
                   accept=".pdf,.docx,.txt"
-                  onChange={(e) => setFiles(Array.from(e.target.files))}
+                  onChange={(e) => setFiles(Array.from(e.target.files || []))}
                   className="hidden"
                 />
               </label>
 
               {files.length > 0 && (
                 <div className="space-y-1 max-h-32 overflow-y-auto">
-                  <p className="text-xs font-medium text-gray-500">{files.length} file(s) selected</p>
+                  <p className="text-xs font-medium text-gray-500">
+                    {files.length} file(s) selected
+                  </p>
                   {files.map((file) => (
-                    <div key={file.name} className={`flex items-center justify-between p-1.5 ${isDark ? "bg-gray-900" : "bg-gray-50"} rounded-lg`}>
+                    <div
+                      key={file.name}
+                      className={`flex items-center justify-between p-1.5 ${isDark ? "bg-gray-900" : "bg-gray-50"
+                        } rounded-lg`}
+                    >
                       <div className="flex items-center gap-2 min-w-0">
                         <FileText size={14} className="text-blue-500 flex-shrink-0" />
-                        <span className={`text-xs ${themeClasses.textPrimary} truncate`}>{file.name}</span>
+                        <span className={`text-xs ${themeClasses.textPrimary} truncate`}>
+                          {file.name}
+                        </span>
                       </div>
-                      <button onClick={() => removeFile(file.name)} className="text-gray-400 hover:text-red-500 flex-shrink-0">
+                      <button
+                        onClick={() => removeFile(file.name)}
+                        className="text-gray-400 hover:text-red-500 flex-shrink-0"
+                      >
                         <X size={14} />
                       </button>
                     </div>
@@ -371,12 +478,15 @@ export default function App() {
             </div>
           </div>
 
-          {/* Ask Question Card */}
-          <div className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden hover:shadow-md transition-all flex flex-col`}>
+          <div
+            className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden hover:shadow-md transition-all flex flex-col`}
+          >
             <div className={`p-5 border-b ${themeClasses.cardBorder}`}>
               <div className="flex items-center gap-2">
                 <MessageCircle size={18} className="text-purple-600" />
-                <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>Ask a Question</h2>
+                <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>
+                  Ask a Question
+                </h2>
               </div>
             </div>
 
@@ -390,7 +500,7 @@ export default function App() {
                 }}
                 disabled={!hasDocuments}
                 rows={2}
-                className={`w-full px-3 py-2 text-sm border ${themeClasses.inputBorder} rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition disabled:opacity-50 disabled:cursor-not-allowed resize-none ${themeClasses.inputBg} ${themeClasses.textPrimary}`}
+                className={`w-full px-3 py-2 text-sm border ${themeClasses.inputBorder} rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition disabled:opacity-50 disabled:cursor-not-allowed resize-none ${themeClasses.inputBg} ${themeClasses.textPrimary} placeholder:text-gray-500 disabled:placeholder:text-gray-500`}
               />
 
               <div className="flex items-center justify-end gap-2">
@@ -406,17 +516,26 @@ export default function App() {
               </div>
 
               {!hasDocuments && (
-                <div className="flex items-center gap-2 p-2 bg-yellow-50 dark:bg-yellow-900/30 rounded-lg border border-yellow-200 dark:border-yellow-800">
+                <div className={`flex items-center gap-2 p-2 rounded-lg border ${themeClasses.inputBg} transition`}>
                   <AlertCircle size={14} className="text-yellow-600 dark:text-yellow-500" />
-                  <p className="text-xs text-yellow-700 dark:text-yellow-300">Upload documents to start asking questions</p>
+                  <p className="text-xs text-yellow-700 dark:text-gray-500">
+                    Upload documents to start asking questions
+                  </p>
                 </div>
               )}
 
               {answer && (
                 <div className="mt-3 space-y-3 max-h-80 overflow-y-auto">
-                  <div className={`p-3 ${isDark ? "bg-gradient-to-r from-blue-900/50 to-purple-900/50" : "bg-gradient-to-r from-blue-50 to-purple-50"} rounded-xl`}>
+                  <div
+                    className={`p-3 ${isDark
+                      ? "bg-gradient-to-r from-blue-900/50 to-purple-900/50"
+                      : "bg-gradient-to-r from-blue-50 to-purple-50"
+                      } rounded-xl`}
+                  >
                     <div className="flex items-center justify-between mb-2">
-                      <h3 className={`text-sm font-semibold ${themeClasses.textPrimary}`}>Answer</h3>
+                      <h3 className={`text-sm font-semibold ${themeClasses.textPrimary}`}>
+                        Answer
+                      </h3>
                       <button
                         onClick={() => copyToClipboard(answer)}
                         className="text-gray-400 hover:text-gray-600"
@@ -424,16 +543,25 @@ export default function App() {
                         {copied ? <Check size={14} /> : <Copy size={14} />}
                       </button>
                     </div>
-                    <p className={`text-sm ${themeClasses.textSecondary} leading-relaxed whitespace-pre-wrap`}>{answer}</p>
+                    <p className={`text-sm ${themeClasses.textSecondary} leading-relaxed whitespace-pre-wrap`}>
+                      {answer}
+                    </p>
                   </div>
 
                   {sources.length > 0 && (
                     <div className={`p-3 ${isDark ? "bg-gray-900" : "bg-gray-50"} rounded-xl`}>
-                      <h4 className={`text-xs font-semibold ${themeClasses.textPrimary} mb-2`}>Sources</h4>
+                      <h4 className={`text-xs font-semibold ${themeClasses.textPrimary} mb-2`}>
+                        Sources
+                      </h4>
                       <div className="space-y-1 max-h-40 overflow-y-auto">
                         {sources.map((source, index) => (
-                          <div key={index} className={`text-xs ${themeClasses.textSecondary} p-2 ${themeClasses.cardBg} rounded border ${themeClasses.cardBorder}`}>
-                            <pre className="whitespace-pre-wrap font-mono text-xs">{JSON.stringify(source, null, 2)}</pre>
+                          <div
+                            key={index}
+                            className={`text-xs ${themeClasses.textSecondary} p-2 ${themeClasses.cardBg} rounded border ${themeClasses.cardBorder}`}
+                          >
+                            <pre className="whitespace-pre-wrap font-mono text-xs">
+                              {JSON.stringify(source, null, 2)}
+                            </pre>
                           </div>
                         ))}
                       </div>
@@ -445,21 +573,25 @@ export default function App() {
           </div>
         </div>
 
-        {/* Lower Grid */}
         <div className="grid lg:grid-cols-2 gap-6 mt-6">
-          {/* Documents Card with Delete Options */}
           <div className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden`}>
             <div className={`p-5 border-b ${themeClasses.cardBorder}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Database size={18} className="text-green-600" />
-                  <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>Indexed Documents</h2>
+                  <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>
+                    Indexed Documents
+                  </h2>
                   {documents.length > 0 && (
-                    <span className={`text-xs ${themeClasses.textSecondary} ${isDark ? "bg-gray-700" : "bg-gray-100"} px-2 py-0.5 rounded-full`}>
+                    <span
+                      className={`text-xs ${themeClasses.textSecondary} ${isDark ? "bg-gray-700" : "bg-gray-100"
+                        } px-2 py-0.5 rounded-full`}
+                    >
                       {documents.length}
                     </span>
                   )}
                 </div>
+
                 {documents.length > 0 && (
                   <button
                     onClick={handleClearAllDocuments}
@@ -478,16 +610,24 @@ export default function App() {
                 <div className="text-center py-6">
                   <FileText size={40} className="mx-auto text-gray-300 dark:text-gray-600 mb-2" />
                   <p className={`text-sm ${themeClasses.textSecondary}`}>No documents uploaded</p>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Upload PDF, DOCX, or TXT files</p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                    Upload PDF, DOCX, or TXT files
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-2">
                   {documents.map((doc) => (
-                    <div className={`flex items-center justify-between p-2 ${isDark ? "bg-gray-900" : "bg-gray-50"} rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition`} key={doc.name}>
+                    <div
+                      className={`flex items-center justify-between p-2 ${isDark ? "bg-gray-900" : "bg-gray-50"
+                        } rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition`}
+                      key={doc.name}
+                    >
                       <div className="flex items-center gap-2 min-w-0">
                         <FileText size={14} className="text-green-600 flex-shrink-0" />
                         <div className="min-w-0">
-                          <p className={`text-sm font-medium ${themeClasses.textPrimary} truncate`}>{doc.name}</p>
+                          <p className={`text-sm font-medium ${themeClasses.textPrimary} truncate`}>
+                            {doc.name}
+                          </p>
                           <p className={`text-xs ${themeClasses.textSecondary}`}>{doc.chunks} chunks</p>
                         </div>
                       </div>
@@ -506,7 +646,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Settings Card */}
           <div className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden`}>
             <div className={`p-5 border-b ${themeClasses.cardBorder}`}>
               <div className="flex items-center gap-2">
@@ -518,39 +657,70 @@ export default function App() {
             <div className="p-5">
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <div>
-                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>Chunk Size</label>
+                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>
+                    Chunk Size
+                  </label>
                   <input
                     type="number"
                     value={settings.chunk_size}
-                    onChange={(e) => setSettings({ ...settings, chunk_size: parseInt(e.target.value) })}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        chunk_size: parseInt(e.target.value, 10),
+                      })
+                    }
                     className={`w-full px-2 py-1.5 text-sm border ${themeClasses.inputBorder} rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${themeClasses.inputBg} ${themeClasses.textPrimary}`}
                   />
                 </div>
+
                 <div>
-                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>Chunk Overlap</label>
+                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>
+                    Chunk Overlap
+                  </label>
                   <input
                     type="number"
                     value={settings.chunk_overlap}
-                    onChange={(e) => setSettings({ ...settings, chunk_overlap: parseInt(e.target.value) })}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        chunk_overlap: parseInt(e.target.value, 10),
+                      })
+                    }
                     className={`w-full px-2 py-1.5 text-sm border ${themeClasses.inputBorder} rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${themeClasses.inputBg} ${themeClasses.textPrimary}`}
                   />
                 </div>
+
                 <div>
-                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>Top K</label>
+                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>
+                    Top K
+                  </label>
                   <input
                     type="number"
                     value={settings.top_k}
-                    onChange={(e) => setSettings({ ...settings, top_k: parseInt(e.target.value) })}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        top_k: parseInt(e.target.value, 10),
+                      })
+                    }
                     className={`w-full px-2 py-1.5 text-sm border ${themeClasses.inputBorder} rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${themeClasses.inputBg} ${themeClasses.textPrimary}`}
                   />
                 </div>
+
                 <div>
-                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>Temperature</label>
+                  <label className={`block text-xs font-medium ${themeClasses.textSecondary} mb-1`}>
+                    Temperature
+                  </label>
                   <input
                     type="number"
                     step="0.1"
                     value={settings.temperature}
-                    onChange={(e) => setSettings({ ...settings, temperature: parseFloat(e.target.value) })}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        temperature: parseFloat(e.target.value),
+                      })
+                    }
                     className={`w-full px-2 py-1.5 text-sm border ${themeClasses.inputBorder} rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${themeClasses.inputBg} ${themeClasses.textPrimary}`}
                   />
                 </div>
@@ -566,19 +736,24 @@ export default function App() {
           </div>
         </div>
 
-        {/* History Card with Clear Button */}
         <div className={`${themeClasses.cardBg} rounded-2xl shadow-sm border ${themeClasses.cardBorder} overflow-hidden mt-6`}>
           <div className={`p-5 border-b ${themeClasses.cardBorder}`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <MessageCircle size={18} className="text-indigo-600" />
-                <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>Question History</h2>
+                <h2 className={`text-base font-semibold ${themeClasses.textPrimary}`}>
+                  Question History
+                </h2>
                 {history.length > 0 && (
-                  <span className={`text-xs ${themeClasses.textSecondary} ${isDark ? "bg-gray-700" : "bg-gray-100"} px-2 py-0.5 rounded-full`}>
+                  <span
+                    className={`text-xs ${themeClasses.textSecondary} ${isDark ? "bg-gray-700" : "bg-gray-100"
+                      } px-2 py-0.5 rounded-full`}
+                  >
                     {history.length}
                   </span>
                 )}
               </div>
+
               {history.length > 0 && (
                 <button
                   onClick={handleClearHistory}
@@ -597,16 +772,26 @@ export default function App() {
               <div className="text-center py-6">
                 <MessageCircle size={40} className="mx-auto text-gray-300 dark:text-gray-600 mb-2" />
                 <p className={`text-sm ${themeClasses.textSecondary}`}>No questions asked yet</p>
-                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Your Q&A history will appear here</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  Your Q&A history will appear here
+                </p>
               </div>
             ) : (
               <div className="space-y-3">
                 {history.slice().reverse().map((item, index) => (
-                  <div key={index} className={`p-3 ${isDark ? "bg-gray-900" : "bg-gray-50"} rounded-lg hover:shadow-sm transition`}>
+                  <div
+                    key={index}
+                    className={`p-3 ${isDark ? "bg-gray-900" : "bg-gray-50"
+                      } rounded-lg hover:shadow-sm transition`}
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
-                        <p className={`text-sm font-semibold ${themeClasses.textPrimary} mb-1 break-words`}>Q: {item.question}</p>
-                        <p className={`text-sm ${themeClasses.textSecondary} break-words line-clamp-2`}>A: {item.answer}</p>
+                        <p className={`text-sm font-semibold ${themeClasses.textPrimary} mb-1 break-words`}>
+                          Q: {item.question}
+                        </p>
+                        <p className={`text-sm ${themeClasses.textSecondary} break-words line-clamp-2`}>
+                          A: {item.answer}
+                        </p>
                       </div>
                       <button
                         onClick={() => copyToClipboard(item.answer)}
